@@ -1,5 +1,5 @@
-[Uploading index.html…]()
-# GESTURE-BATTLE<!DOCTYPE html>
+(https://github.com/user-attachments/files/32785172/index.2.html)
+<!DOCTYPE html>
 <html lang="id">
 <head>
     <meta charset="UTF-8">
@@ -76,8 +76,7 @@
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         
         .score-box {
-            backdrop-filter: blur(12px);
-            background: rgba(15, 23, 42, 0.65);
+            background: rgba(15, 23, 42, 0.78); /* blur dihapus: berat di IFP */
             border: 3px solid;
         }
 
@@ -96,7 +95,11 @@
             cursor: pointer;
             pointer-events: auto;
             transition: all 0.2s ease;
-            backdrop-filter: blur(5px);
+        }
+        /* Performa IFP: matikan semua backdrop-blur di atas canvas kamera yang bergerak tiap frame */
+        .backdrop-blur, .backdrop-blur-sm, .backdrop-blur-md, .backdrop-blur-lg, .backdrop-blur-xl {
+            -webkit-backdrop-filter: none !important;
+            backdrop-filter: none !important;
         }
         .float-btn:hover { background: #6366f1; transform: scale(1.1); }
         .float-btn svg { width: 20px; height: 20px; fill: white; }
@@ -201,7 +204,7 @@
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><path d="M575.8 255.5c0 18-15 32.1-32 32.1h-32l.7 160.2c.2 35.5-28.5 64.3-64 64.3H128.1c-35.3 0-64-28.7-64-64V287.6H32c-18 0-32-14-32-32.1c0-9 3-17 10-24L266.4 8c7-7 15-8 22-8s15 2 21 7L564.8 231.5c8 7 11 15 11 24z"/></svg>
     </div>
 
-    <video id="input_video" class="hidden" autoplay playsinline></video>
+    <video id="input_video" autoplay playsinline muted style="position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none;z-index:-1"></video>
     <canvas id="gameCanvas"></canvas>
 
     <div class="ui-layer flex flex-col justify-between">
@@ -758,12 +761,21 @@
         const ctx = canvas.getContext('2d');
         let cw = window.innerWidth;
         let ch = window.innerHeight;
-        canvas.width = cw;
-        canvas.height = ch;
+        // Resolusi internal canvas dibatasi (koordinat game tetap cw x ch) agar ringan di IFP 4K/1080p
+        const MAX_RENDER_W = 1440;
+        let rScale = 1;
+        let bgGradient = null;
+        function applyCanvasSize() {
+            rScale = Math.min(1, MAX_RENDER_W / cw);
+            canvas.width = Math.round(cw * rScale);
+            canvas.height = Math.round(ch * rScale);
+            bgGradient = null; // dibuat ulang sesuai ukuran baru
+        }
+        applyCanvasSize();
 
         window.addEventListener('resize', () => {
             cw = window.innerWidth; ch = window.innerHeight;
-            canvas.width = cw; canvas.height = ch;
+            applyCanvasSize();
         });
 
         let gameState = 'SETUP'; // SETUP, PLAYING, GAMEOVER
@@ -830,10 +842,10 @@
                 this.baseX = this.x;
             }
 
-            update() {
+            update(k = 1) {
                 if (!this.active) return;
-                this.y += this.speed;
-                this.swingAngle += 0.02;
+                this.y += this.speed * k;
+                this.swingAngle += 0.02 * k;
                 this.x = this.baseX + Math.sin(this.swingAngle) * (cw * 0.015);
                 if (this.y > ch + this.radius * 2) this.active = false;
             }
@@ -884,9 +896,9 @@
                 this.life = 1.0; this.color = color;
                 this.size = Math.random() * 8 + 4;
             }
-            update() {
-                this.x += this.vx; this.y += this.vy;
-                this.life -= 0.035;
+            update(k = 1) {
+                this.x += this.vx * k; this.y += this.vy * k;
+                this.life -= 0.035 * k;
             }
             draw(ctx) {
                 if (this.life <= 0) return;
@@ -1217,41 +1229,93 @@
             minTrackingConfidence: 0.4 // Diturunkan ke 0.4 agar pelacakan tidak mudah putus
         });
 
+        // Hasil AI hanya disimpan; PENGGAMBARAN dilakukan di loop requestAnimationFrame
+        // agar gerakan tetap mulus walau AI hanya menghasilkan 10-20 hasil per detik.
+        let lastResultImage = null;
+        let targetHands = []; // {x, y, side}
+        let smoothHands = []; // posisi yang sudah dihaluskan {x, y, side}
+
         hands.onResults((results) => {
-            ctx.clearRect(0, 0, cw, ch);
-
-            if (results.image) {
-                ctx.save();
-                ctx.scale(-1, 1);
-                ctx.imageSmoothingEnabled = true;
-                ctx.drawImage(results.image, -cw, 0, cw, ch);
-                
-                const bgGradient = ctx.createRadialGradient(-cw/2, ch/2, Math.min(cw, ch)*0.3, -cw/2, ch/2, Math.max(cw, ch)*0.85);
-                bgGradient.addColorStop(0, 'rgba(15, 23, 42, 0.2)');
-                bgGradient.addColorStop(1, 'rgba(15, 23, 42, 0.6)');
-                ctx.fillStyle = bgGradient; ctx.fillRect(-cw, 0, cw, ch);
-                ctx.restore();
-            }
-
             aiResultCount++;
-            p1Hands = []; p2Hands = [];
+            if (results.image) lastResultImage = results.image;
 
+            targetHands = [];
             if (results.multiHandLandmarks) {
                 for (const landmarks of results.multiHandLandmarks) {
                     const indexTip = landmarks[8];
-                    const hx = (1 - indexTip.x) * cw; 
+                    const hx = (1 - indexTip.x) * cw;
                     const hy = indexTip.y * ch;
-
                     // Tidak peduli label kiri/kanan dari MediaPipe, cukup deteksi posisi fisik di layar
-                    if (hx < cw / 2) p1Hands.push({ x: hx, y: hy });
-                    else p2Hands.push({ x: hx, y: hy });
+                    targetHands.push({ x: hx, y: hy, side: hx < cw / 2 ? 1 : 2 });
                 }
             }
-
             updateHandStatus(results.multiHandLandmarks ? results.multiHandLandmarks.length : 0);
-
-            if (gameState === 'PLAYING') updateAndDrawGame();
         });
+
+        // Haluskan posisi tangan (interpolasi) supaya pointer tidak patah-patah
+        function smoothHandPositions(dt) {
+            const a = 1 - Math.exp(-dt * 28);
+            const used = new Set();
+            const next = [];
+            for (const t of targetHands) {
+                let best = -1, bestD = cw * 0.3;
+                for (let i = 0; i < smoothHands.length; i++) {
+                    if (used.has(i)) continue;
+                    const d = Math.hypot(smoothHands[i].x - t.x, smoothHands[i].y - t.y);
+                    if (d < bestD) { bestD = d; best = i; }
+                }
+                if (best >= 0) {
+                    used.add(best);
+                    const o = smoothHands[best];
+                    next.push({ x: o.x + (t.x - o.x) * a, y: o.y + (t.y - o.y) * a, side: t.side });
+                } else {
+                    next.push({ x: t.x, y: t.y, side: t.side });
+                }
+            }
+            smoothHands = next;
+            p1Hands = []; p2Hands = [];
+            for (const h of smoothHands) (h.side === 1 ? p1Hands : p2Hands).push({ x: h.x, y: h.y });
+        }
+
+        function drawCameraBackground() {
+            // Utamakan frame video langsung (30 fps), cadangan: frame hasil AI terakhir
+            let src = null;
+            if (videoElement.readyState >= 2 && videoElement.videoWidth > 0) src = videoElement;
+            else if (lastResultImage) src = lastResultImage;
+            if (!src) return;
+
+            ctx.save();
+            ctx.scale(-1, 1);
+            ctx.drawImage(src, -cw, 0, cw, ch);
+            ctx.restore();
+
+            if (!bgGradient) {
+                bgGradient = ctx.createRadialGradient(cw/2, ch/2, Math.min(cw, ch)*0.3, cw/2, ch/2, Math.max(cw, ch)*0.85);
+                bgGradient.addColorStop(0, 'rgba(15, 23, 42, 0.2)');
+                bgGradient.addColorStop(1, 'rgba(15, 23, 42, 0.6)');
+            }
+            ctx.fillStyle = bgGradient;
+            ctx.fillRect(0, 0, cw, ch);
+        }
+
+        // Patokan kecepatan game: 30 fps (sama dengan kecepatan maksimum kamera sebelumnya)
+        let frameK = 1;
+        let lastFrameTime = 0;
+        function renderLoop(now) {
+            requestAnimationFrame(renderLoop);
+            if (!lastFrameTime) lastFrameTime = now;
+            let dt = (now - lastFrameTime) / 1000;
+            lastFrameTime = now;
+            if (dt > 0.1) dt = 0.1;
+            frameK = dt * 30;
+
+            ctx.setTransform(rScale, 0, 0, rScale, 0, 0);
+            ctx.clearRect(0, 0, cw, ch);
+            drawCameraBackground();
+            smoothHandPositions(dt);
+            if (gameState === 'PLAYING') updateAndDrawGame();
+        }
+        requestAnimationFrame(renderLoop);
 
         function updateAndDrawGame() {
             // Split Line
@@ -1261,7 +1325,7 @@
 
             // Particles
             for (let i = particles.length - 1; i >= 0; i--) {
-                particles[i].update(); particles[i].draw(ctx);
+                particles[i].update(frameK); particles[i].draw(ctx);
                 if (particles[i].life <= 0) particles.splice(i, 1);
             }
 
@@ -1269,7 +1333,7 @@
             let itemsActive = false;
             for (let i = fallingItems.length - 1; i >= 0; i--) {
                 let item = fallingItems[i];
-                item.update(); item.draw(ctx);
+                item.update(frameK); item.draw(ctx);
                 if (item.active) itemsActive = true;
 
                 if (item.active) {
@@ -1356,7 +1420,7 @@
             let stream;
             try {
                 stream = await md.getUserMedia({
-                    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+                    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30, max: 30 } },
                     audio: false
                 });
             } catch (e) {
